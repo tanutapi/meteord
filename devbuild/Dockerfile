@@ -1,5 +1,5 @@
-FROM abernix/meteord:base
-MAINTAINER Jesse Rosenberger
+FROM tanutapi/meteord:base
+MAINTAINER Tanut Apiwong
 
 ARG NODE_VERSION
 ENV NODE_VERSION ${NODE_VERSION:-8.15.1}
