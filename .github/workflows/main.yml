@@ -1,0 +1,115 @@
+# File: .github/workflows/ci.yml
+name: CI & Docker Deploy
+
+on:
+  push:
+    # Always run the build/test job on every push
+    branches:
+      - "**"
+  pull_request:
+    # Also run build/test on PRs
+    branches:
+      - "**"
+
+env:
+  NODE_VERSION: 12.16.1
+
+jobs:
+  build_and_test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Cache Meteor (~/.meteor)
+        uses: actions/cache@v2
+        with:
+          path: ~/.meteor
+          # This key will be reused unless Meteor’s installation changes.
+          key: ${{ runner.os }}-meteor
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install apt dependencies
+        run: |
+          # Add the official Ubuntu toolchain test PPA for newer libstdc++
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update -y
+          sudo apt-get install -y libstdc++-4.9-dev
+
+      - name: Install Meteor (if not already installed)
+        run: |
+          if [ ! -f "$HOME/.meteor/meteor" ]; then
+            curl https://install.meteor.com | sh
+          fi
+          # Symlink meteor into /usr/bin so it’s on PATH
+          sudo ln -sf "$HOME/.meteor/meteor" /usr/bin/meteor
+
+      - name: Run Tests
+        working-directory: ./tests
+        run: bash run_tests.sh
+
+  deploy:
+    name: Push Docker Images
+    needs: build_and_test
+    runs-on: ubuntu-latest
+
+    # Only run this job if the branch name matches node-<version>, e.g. node-12.16.1
+    if: startsWith(github.ref, 'refs/heads/node-')
+
+    env:
+      DOCKER_HUB_REPO: tanutapi/meteord
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Extract NODE_VERSION & NODE_MAJOR from branch
+        id: vars
+        run: |
+          # Strip "refs/heads/node-" prefix to get e.g. "12.16.1"
+          NODE_VERSION="${GITHUB_REF#refs/heads/node-}"
+          echo "NODE_VERSION=$NODE_VERSION" >>"$GITHUB_OUTPUT"
+          # Take the major version (everything before the first dot)
+          NODE_MAJOR="${NODE_VERSION%%.*}"
+          echo "NODE_MAJOR=$NODE_MAJOR" >>"$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASS }}
+
+      - name: Push all image variants (full + major tags)
+        run: |
+          IMAGES="base onbuild devbuild binbuild"
+          FULL_TAG_PREFIX="${{ env.DOCKER_HUB_REPO }}:node-${{ steps.vars.outputs.NODE_VERSION }}-"
+          MAJOR_TAG_PREFIX="${{ env.DOCKER_HUB_REPO }}:node-${{ steps.vars.outputs.NODE_MAJOR }}-"
+
+          # 1. Push the full-version tags
+          for variant in $IMAGES; do
+            docker push "${FULL_TAG_PREFIX}${variant}"
+          done
+
+          # 2. Tag full-version → major-version, then push
+          for variant in $IMAGES; do
+            docker tag "${FULL_TAG_PREFIX}${variant}" "${MAJOR_TAG_PREFIX}${variant}"
+            docker push "${MAJOR_TAG_PREFIX}${variant}"
+          done
+
+          # 3. If this is the “4.x” track (NODE_MAJOR == "4"), also tag “bare” and “latest”
+          if [ "${{ steps.vars.outputs.NODE_MAJOR }}" = "4" ]; then
+            for variant in $IMAGES; do
+              # Tag node-4.x variant as bare "<repo>:<variant>"
+              docker tag "${FULL_TAG_PREFIX}${variant}" "${{ env.DOCKER_HUB_REPO }}:${variant}"
+              docker push "${{ env.DOCKER_HUB_REPO }}:${variant}"
+            done
+
+            # Also tag “base” specifically as "latest"
+            docker tag "${{ env.DOCKER_HUB_REPO }}:base" "${{ env.DOCKER_HUB_REPO }}:latest"
+            docker push "${{ env.DOCKER_HUB_REPO }}:latest"
+          fi
