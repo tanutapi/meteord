@@ -1,4 +1,4 @@
-FROM debian:buster
+FROM debian:stretch
 MAINTAINER Tanut Apiwong
 
 ENV METEORD_DIR /opt/meteord
